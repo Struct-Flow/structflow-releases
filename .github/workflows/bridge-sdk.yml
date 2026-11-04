@@ -1,0 +1,63 @@
+name: Bridge SDK
+
+# Pushes StructFlow's C# SDK packages (StructFlow.Bridge.Sources, StructFlow.Bridge.Acad.Sources) to
+# the organization's private GitHub Packages feed. GitHub links a package to the repository whose
+# workflow pushes it, so the push runs here and the packages are listed under this repository.
+#
+# Struct-Flow/structflow-studio builds and tests them (its .github/workflows/bridge-sdk.yml), leaves
+# them on a draft release here and sends repository_dispatch "bridge-sdk" with the tag. This
+# repository is public; a draft is visible only to people with write access. The job deletes the
+# draft once both packages are pushed, which is how structflow-studio's run knows it is done.
+on:
+  repository_dispatch:
+    types: [bridge-sdk]
+
+permissions:
+  contents: write # read and delete the draft release
+  packages: write
+
+concurrency:
+  group: bridge-sdk
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DOTNET_NOLOGO: true
+    steps:
+      - name: Tag
+        env:
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          if ! [[ "$TAG" =~ ^bridge-sdk-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "::error::client_payload.tag is not bridge-sdk-v<major.minor.patch>"
+            exit 1
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "SDK_VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+
+      - name: Packages from the draft release
+        run: |
+          state=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq "first(.[] | select(.tag_name == \"$TAG\") | if .draft then \"draft\" else \"published\" end) // \"none\"")
+          if [ "$state" != draft ]; then
+            echo "::error::$TAG is not a draft release here ($state)"
+            exit 1
+          fi
+          mkdir -p packages
+          for id in StructFlow.Bridge.Sources StructFlow.Bridge.Acad.Sources; do
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$id.$SDK_VERSION.nupkg" --dir packages
+          done
+          ls -l packages
+
+      - name: Push to GitHub Packages
+        run: |
+          for package in packages/*.nupkg; do
+            dotnet nuget push "$package" --source https://nuget.pkg.github.com/Struct-Flow/index.json --api-key "$GH_TOKEN" --skip-duplicate
+          done
+
+      - name: Delete the draft
+        run: gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
